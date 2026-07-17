@@ -25,7 +25,13 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Trucker Log needs access to your photos so you can attach receipts, BOLs, and load photos to your logbook.",
+          "cameraPermission": "Trucker Log needs access to your camera so you can snap a photo of receipts, BOLs, and loads for your logbook."
+        }
+      ]
     ]
   }
 }
