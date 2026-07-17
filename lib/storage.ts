@@ -1,25 +1,38 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Column, Logbook, Row } from './types';
+import { Column, Logbook, Row, Settings } from './types';
 import { makeId } from './id';
 
 const STORAGE_KEY = 'trucker-log.v1';
 
 export function todayLabel(): string {
   const d = new Date();
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' });
 }
 
-// Sensible starter columns for a trucker. Users can rename, add, or remove them.
+// Columns that mirror the driver's paper settlement sheet. Editable by the user.
 export function defaultColumns(): Column[] {
   return [
     { id: 'date', name: 'Date', type: 'text' },
-    { id: 'load', name: 'Load', type: 'text' },
+    { id: 'container', name: 'Container/Trailer', type: 'text' },
+    { id: 'chassis', name: 'Chassis', type: 'text' },
     { id: 'from', name: 'From', type: 'text' },
     { id: 'to', name: 'To', type: 'text' },
-    { id: 'miles', name: 'Miles', type: 'number' },
-    { id: 'fuel', name: 'Fuel $', type: 'number' },
-    { id: 'notes', name: 'Notes', type: 'text' },
+    { id: 'rate', name: 'Rate', type: 'number' },
+    { id: 'notes', name: 'Notes/Comments', type: 'text' },
   ];
+}
+
+export function defaultSettings(): Settings {
+  return {
+    driverName: '',
+    companyName: 'Site Transportation',
+    companyAddress: '210 Industry DR, Frankfort, IL 60423',
+    companyPhone: '708-878-2836',
+    companyEmail: '',
+    payPercent: '',
+    adjustment: '',
+    deduction: '',
+  };
 }
 
 // A fresh row with today's date prefilled into any column literally named "Date".
@@ -33,7 +46,7 @@ export function makeRow(columns: Column[]): Row {
 
 export function emptyLogbook(): Logbook {
   const columns = defaultColumns();
-  return { columns, rows: [makeRow(columns)] };
+  return { columns, rows: [makeRow(columns)], settings: defaultSettings() };
 }
 
 export async function loadLogbook(): Promise<Logbook> {
@@ -44,7 +57,12 @@ export async function loadLogbook(): Promise<Logbook> {
     if (!parsed || !Array.isArray(parsed.columns) || !Array.isArray(parsed.rows)) {
       return emptyLogbook();
     }
-    return { columns: parsed.columns, rows: parsed.rows };
+    return {
+      columns: parsed.columns,
+      rows: parsed.rows,
+      // merge so older saves (without settings) still open cleanly
+      settings: { ...defaultSettings(), ...(parsed.settings ?? {}) },
+    };
   } catch {
     return emptyLogbook();
   }

@@ -5,34 +5,32 @@ import {
   KeyboardAvoidingView, Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Column, ColumnType, Logbook, Row } from '../lib/types';
-import {
-  loadLogbook, saveLogbook, makeRow, emptyLogbook,
-} from '../lib/storage';
+import { Column, ColumnType, Logbook, Row, Settings } from '../lib/types';
+import { loadLogbook, saveLogbook, makeRow } from '../lib/storage';
 import { capturePhoto, deletePhoto } from '../lib/photos';
+import { computePay, columnTotal, formatMoney } from '../lib/pay';
+import { printLogbook, shareLogbook } from '../lib/export';
 import { makeId } from '../lib/id';
 import { colors, spacing, font } from '../lib/theme';
 
-const PHOTO_W = 60;
-const ACTIONS_W = 48;
-const colWidth = (c: Column) => (c.type === 'number' ? 96 : c.name.toLowerCase() === 'notes' ? 180 : 140);
+const PHOTO_W = 56;
+const ACTIONS_W = 44;
+const colWidth = (c: Column) =>
+  c.type === 'number' ? 96 : /notes|comment/i.test(c.name) ? 170 : /container|chassis/i.test(c.name) ? 150 : 120;
 
 export default function LogbookScreen() {
   const insets = useSafeAreaInsets();
   const [book, setBook] = useState<Logbook | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // photo action target + preview
   const [photoRowId, setPhotoRowId] = useState<string | null>(null);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
-  // column editor: 'new' to add, or a Column to edit
   const [colEditor, setColEditor] = useState<'new' | Column | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    loadLogbook().then(setBook);
-  }, []);
+  useEffect(() => { loadLogbook().then(setBook); }, []);
 
-  // Debounced persistence on every mutation.
   const commit = useCallback((next: Logbook) => {
     setBook(next);
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -45,16 +43,11 @@ export default function LogbookScreen() {
     if (!book) return;
     commit({
       ...book,
-      rows: book.rows.map((r) =>
-        r.id === rowId ? { ...r, cells: { ...r.cells, [colId]: value } } : r
-      ),
+      rows: book.rows.map((r) => (r.id === rowId ? { ...r, cells: { ...r.cells, [colId]: value } } : r)),
     });
   };
 
-  const addRow = () => {
-    if (!book) return;
-    commit({ ...book, rows: [...book.rows, makeRow(book.columns)] });
-  };
+  const addRow = () => { if (book) commit({ ...book, rows: [...book.rows, makeRow(book.columns)] }); };
 
   const deleteRow = (row: Row) => {
     if (!book) return;
@@ -76,9 +69,7 @@ export default function LogbookScreen() {
     if (draft.id) {
       commit({
         ...book,
-        columns: book.columns.map((c) =>
-          c.id === draft.id ? { ...c, name, type: draft.type } : c
-        ),
+        columns: book.columns.map((c) => (c.id === draft.id ? { ...c, name, type: draft.type } : c)),
       });
     } else {
       const col: Column = { id: makeId('c_'), name, type: draft.type };
@@ -117,10 +108,7 @@ export default function LogbookScreen() {
     if (!uri) return;
     const existing = book.rows.find((r) => r.id === rowId)?.photoUri;
     if (existing) deletePhoto(existing);
-    commit({
-      ...book,
-      rows: book.rows.map((r) => (r.id === rowId ? { ...r, photoUri: uri } : r)),
-    });
+    commit({ ...book, rows: book.rows.map((r) => (r.id === rowId ? { ...r, photoUri: uri } : r)) });
   };
 
   const removePhoto = () => {
@@ -129,18 +117,41 @@ export default function LogbookScreen() {
     if (!rowId || !book) return;
     const row = book.rows.find((r) => r.id === rowId);
     if (row?.photoUri) deletePhoto(row.photoUri);
-    commit({
-      ...book,
-      rows: book.rows.map((r) => (r.id === rowId ? { ...r, photoUri: null } : r)),
-    });
+    commit({ ...book, rows: book.rows.map((r) => (r.id === rowId ? { ...r, photoUri: null } : r)) });
+  };
+
+  const onSend = async () => {
+    if (!book || busy) return;
+    setBusy(true);
+    try {
+      const ok = await shareLogbook(book);
+      if (!ok) Alert.alert('Not available', 'Sharing isn’t supported on this device.');
+    } catch (e: any) {
+      Alert.alert('Could not send', e?.message ?? 'Something went wrong.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPrint = async () => {
+    if (!book || busy) return;
+    setBusy(true);
+    try {
+      await printLogbook(book);
+    } catch (e: any) {
+      Alert.alert('Could not print', e?.message ?? 'Something went wrong.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const gridWidth = useMemo(
     () => (book ? PHOTO_W + book.columns.reduce((w, c) => w + colWidth(c), 0) + ACTIONS_W : 0),
     [book]
   );
+  const pay = useMemo(() => (book ? computePay(book) : null), [book]);
 
-  if (!book) {
+  if (!book || !pay) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={colors.accent} size="large" />
@@ -155,6 +166,7 @@ export default function LogbookScreen() {
       style={[styles.container, { paddingTop: insets.top }]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
+      {/* toolbar */}
       <View style={styles.header}>
         <View style={{ flex: 1 }}>
           <Text style={styles.title}>Logbook</Text>
@@ -162,58 +174,78 @@ export default function LogbookScreen() {
             {book.rows.length} {book.rows.length === 1 ? 'entry' : 'entries'}
           </Text>
         </View>
-        <TouchableOpacity
-          style={styles.headerBtn}
-          onPress={() => setColEditor('new')}
-        >
-          <Text style={styles.headerBtnText}>+ Column</Text>
+        <TouchableOpacity style={styles.iconBtn} onPress={onSend} disabled={busy}>
+          <Text style={styles.iconBtnText}>Send</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.iconBtn} onPress={onPrint} disabled={busy}>
+          <Text style={styles.iconBtnText}>Print</Text>
         </TouchableOpacity>
       </View>
 
+      {/* summary / letterhead bar */}
+      <TouchableOpacity style={styles.summaryBar} onPress={() => setShowDetails(true)}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.summaryCompany} numberOfLines={1}>
+            {book.settings.companyName || 'Set company'}
+          </Text>
+          <Text style={styles.summaryDriver} numberOfLines={1}>
+            {book.settings.driverName ? `Driver: ${book.settings.driverName}` : 'Tap to add driver & pay details'}
+          </Text>
+        </View>
+        <View style={styles.summaryPay}>
+          <Text style={styles.summaryPayLabel}>{pay.hasPay ? 'Take-home' : 'Total'}</Text>
+          <Text style={styles.summaryPayValue}>
+            {formatMoney(pay.hasPay ? pay.takeHome : pay.gross)}
+          </Text>
+        </View>
+        <Text style={styles.chevron}>›</Text>
+      </TouchableOpacity>
+
+      {/* grid */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ minWidth: gridWidth }}>
-        <View>
-          {/* header row */}
+        <View style={{ flex: 1 }}>
           <View style={styles.headRow}>
-            <View style={[styles.headCell, { width: PHOTO_W }]}>
-              <Text style={styles.headText}>📷</Text>
-            </View>
+            <View style={[styles.headCell, { width: PHOTO_W }]}><Text style={styles.headText}>Photo</Text></View>
             {book.columns.map((c) => (
-              <TouchableOpacity
-                key={c.id}
-                style={[styles.headCell, { width: colWidth(c) }]}
-                onPress={() => setColEditor(c)}
-              >
+              <TouchableOpacity key={c.id} style={[styles.headCell, { width: colWidth(c) }]} onPress={() => setColEditor(c)}>
                 <Text style={styles.headText} numberOfLines={1}>{c.name}</Text>
               </TouchableOpacity>
             ))}
-            <View style={[styles.headCell, { width: ACTIONS_W }]} />
+            <TouchableOpacity style={[styles.headCell, styles.addColCell, { width: ACTIONS_W }]} onPress={() => setColEditor('new')}>
+              <Text style={styles.addColText}>＋</Text>
+            </TouchableOpacity>
           </View>
 
-          {/* body */}
           <FlatList
             data={book.rows}
             keyExtractor={(r) => r.id}
-            style={{ maxHeight: '100%' }}
             keyboardShouldPersistTaps="handled"
             ListFooterComponent={
-              <TouchableOpacity style={[styles.addRow, { width: gridWidth }]} onPress={addRow}>
-                <Text style={styles.addRowText}>+  Add entry</Text>
-              </TouchableOpacity>
+              <View>
+                <View style={[styles.row, styles.totalRow, { width: gridWidth }]}>
+                  <View style={{ width: PHOTO_W }} />
+                  {book.columns.map((c, i) => (
+                    <View key={c.id} style={[styles.totalCell, { width: colWidth(c) }]}>
+                      <Text style={[styles.totalText, c.type === 'number' && styles.totalNum]} numberOfLines={1}>
+                        {c.type === 'number' ? formatMoney(columnTotal(book, c.id)) : i === 0 ? 'TOTAL' : ''}
+                      </Text>
+                    </View>
+                  ))}
+                  <View style={{ width: ACTIONS_W }} />
+                </View>
+                <TouchableOpacity style={[styles.addRow, { width: gridWidth }]} onPress={addRow}>
+                  <Text style={styles.addRowText}>＋  Add entry</Text>
+                </TouchableOpacity>
+              </View>
             }
             renderItem={({ item, index }) => (
               <View style={[styles.row, index % 2 === 1 && styles.rowAlt]}>
                 <TouchableOpacity
                   style={[styles.photoCell, { width: PHOTO_W }]}
-                  onPress={() =>
-                    item.photoUri ? setPreviewUri(item.photoUri) : setPhotoRowId(item.id)
-                  }
+                  onPress={() => (item.photoUri ? setPreviewUri(item.photoUri) : setPhotoRowId(item.id))}
                   onLongPress={() => setPhotoRowId(item.id)}
                 >
-                  {item.photoUri ? (
-                    <Image source={{ uri: item.photoUri }} style={styles.thumb} />
-                  ) : (
-                    <Text style={styles.photoPlus}>＋</Text>
-                  )}
+                  {item.photoUri ? <Image source={{ uri: item.photoUri }} style={styles.thumb} /> : <Text style={styles.photoPlus}>＋</Text>}
                 </TouchableOpacity>
 
                 {book.columns.map((c) => (
@@ -225,14 +257,11 @@ export default function LogbookScreen() {
                     placeholder="—"
                     placeholderTextColor={colors.border}
                     keyboardType={c.type === 'number' ? 'numbers-and-punctuation' : 'default'}
-                    multiline={c.name.toLowerCase() === 'notes'}
+                    multiline={/notes|comment/i.test(c.name)}
                   />
                 ))}
 
-                <TouchableOpacity
-                  style={[styles.actionCell, { width: ACTIONS_W }]}
-                  onPress={() => deleteRow(item)}
-                >
+                <TouchableOpacity style={[styles.actionCell, { width: ACTIONS_W }]} onPress={() => deleteRow(item)}>
                   <Text style={styles.trash}>✕</Text>
                 </TouchableOpacity>
               </View>
@@ -241,19 +270,25 @@ export default function LogbookScreen() {
         </View>
       </ScrollView>
 
-      {/* photo options sheet */}
+      {busy && (
+        <View style={styles.busyOverlay}>
+          <ActivityIndicator color={colors.accent} size="large" />
+        </View>
+      )}
+
+      {/* photo options */}
       <BottomSheet visible={!!photoRowId} onClose={() => setPhotoRowId(null)}>
-        <SheetButton label="📷  Take photo" onPress={() => choosePhoto('camera')} />
-        <SheetButton label="🖼  Choose from library" onPress={() => choosePhoto('library')} />
+        <SheetButton label="Take photo" onPress={() => choosePhoto('camera')} />
+        <SheetButton label="Choose from library" onPress={() => choosePhoto('library')} />
         {activeRow?.photoUri && (
           <>
-            <SheetButton label="👁  View photo" onPress={() => { const u = activeRow.photoUri!; setPhotoRowId(null); setPreviewUri(u); }} />
-            <SheetButton label="🗑  Remove photo" danger onPress={removePhoto} />
+            <SheetButton label="View photo" onPress={() => { const u = activeRow.photoUri!; setPhotoRowId(null); setPreviewUri(u); }} />
+            <SheetButton label="Remove photo" danger onPress={removePhoto} />
           </>
         )}
       </BottomSheet>
 
-      {/* full-screen preview */}
+      {/* preview */}
       <Modal visible={!!previewUri} transparent animationType="fade" onRequestClose={() => setPreviewUri(null)}>
         <Pressable style={styles.previewBackdrop} onPress={() => setPreviewUri(null)}>
           {previewUri && <Image source={{ uri: previewUri }} style={styles.previewImg} resizeMode="contain" />}
@@ -262,17 +297,94 @@ export default function LogbookScreen() {
       </Modal>
 
       {/* column editor */}
-      <ColumnEditor
-        target={colEditor}
-        onCancel={() => setColEditor(null)}
-        onSave={saveColumn}
-        onDelete={deleteColumn}
+      <ColumnEditor target={colEditor} onCancel={() => setColEditor(null)} onSave={saveColumn} onDelete={deleteColumn} />
+
+      {/* details / pay */}
+      <DetailsSheet
+        visible={showDetails}
+        settings={book.settings}
+        pay={pay}
+        onClose={() => setShowDetails(false)}
+        onChange={(settings) => commit({ ...book, settings })}
       />
     </KeyboardAvoidingView>
   );
 }
 
-/* ---------- Column editor modal ---------- */
+/* ---------- Details & pay sheet ---------- */
+function DetailsSheet({
+  visible, settings, pay, onClose, onChange,
+}: {
+  visible: boolean;
+  settings: Settings;
+  pay: ReturnType<typeof computePay>;
+  onClose: () => void;
+  onChange: (s: Settings) => void;
+}) {
+  const set = (k: keyof Settings, v: string) => onChange({ ...settings, [k]: v });
+  return (
+    <BottomSheet visible={visible} onClose={onClose} scroll>
+      <Text style={styles.sheetTitle}>Sheet details</Text>
+
+      <Field label="Company" value={settings.companyName} onChange={(v) => set('companyName', v)} />
+      <Field label="Address" value={settings.companyAddress} onChange={(v) => set('companyAddress', v)} />
+      <View style={styles.fieldRow}>
+        <Field label="Phone" value={settings.companyPhone} onChange={(v) => set('companyPhone', v)} flex />
+        <Field label="Email" value={settings.companyEmail} onChange={(v) => set('companyEmail', v)} flex />
+      </View>
+      <Field label="Driver" value={settings.driverName} onChange={(v) => set('driverName', v)} />
+
+      <Text style={[styles.sheetTitle, { marginTop: spacing.lg }]}>Pay</Text>
+      <View style={styles.fieldRow}>
+        <Field label="Adjustment ($)" value={settings.adjustment} onChange={(v) => set('adjustment', v)} numeric flex />
+        <Field label="Driver %" value={settings.payPercent} onChange={(v) => set('payPercent', v)} numeric flex />
+        <Field label="Deduction ($)" value={settings.deduction} onChange={(v) => set('deduction', v)} numeric flex />
+      </View>
+
+      <View style={styles.payCard}>
+        <PayRow label="Gross" value={formatMoney(pay.gross)} />
+        {pay.adjustment !== 0 && <PayRow label="Adjustment" value={formatMoney(pay.adjustment)} />}
+        {pay.adjustment !== 0 && <PayRow label="Adjusted total" value={formatMoney(pay.adjusted)} />}
+        {pay.percent !== null && <PayRow label={`Driver share (${pay.percent}%)`} value={formatMoney(pay.share)} />}
+        {pay.deduction !== 0 && <PayRow label="Deduction" value={`-${formatMoney(pay.deduction)}`} />}
+        <PayRow label={pay.hasPay ? 'Take-home' : 'Total'} value={formatMoney(pay.hasPay ? pay.takeHome : pay.gross)} strong />
+      </View>
+
+      <TouchableOpacity style={styles.saveBtn} onPress={onClose}>
+        <Text style={styles.saveBtnText}>Done</Text>
+      </TouchableOpacity>
+    </BottomSheet>
+  );
+}
+
+function Field({
+  label, value, onChange, numeric, flex,
+}: { label: string; value: string; onChange: (v: string) => void; numeric?: boolean; flex?: boolean }) {
+  return (
+    <View style={[styles.field, flex && { flex: 1 }]}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <TextInput
+        style={styles.sheetInput}
+        value={value}
+        onChangeText={onChange}
+        placeholder="—"
+        placeholderTextColor={colors.border}
+        keyboardType={numeric ? 'numbers-and-punctuation' : 'default'}
+      />
+    </View>
+  );
+}
+
+function PayRow({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+  return (
+    <View style={[styles.payRow, strong && styles.payRowStrong]}>
+      <Text style={[styles.payLabel, strong && styles.payStrongText]}>{label}</Text>
+      <Text style={[styles.payValue, strong && styles.payStrongText]}>{value}</Text>
+    </View>
+  );
+}
+
+/* ---------- Column editor ---------- */
 function ColumnEditor({
   target, onCancel, onSave, onDelete,
 }: {
@@ -303,11 +415,7 @@ function ColumnEditor({
       />
       <View style={styles.typeRow}>
         {(['text', 'number'] as ColumnType[]).map((t) => (
-          <TouchableOpacity
-            key={t}
-            style={[styles.typeBtn, type === t && styles.typeBtnActive]}
-            onPress={() => setType(t)}
-          >
+          <TouchableOpacity key={t} style={[styles.typeBtn, type === t && styles.typeBtnActive]} onPress={() => setType(t)}>
             <Text style={[styles.typeBtnText, type === t && styles.typeBtnTextActive]}>
               {t === 'text' ? 'Text' : 'Number'}
             </Text>
@@ -328,23 +436,24 @@ function ColumnEditor({
 
 /* ---------- Reusable bottom sheet ---------- */
 function BottomSheet({
-  visible, onClose, children,
-}: { visible: boolean; onClose: () => void; children: React.ReactNode }) {
+  visible, onClose, children, scroll,
+}: { visible: boolean; onClose: () => void; children: React.ReactNode; scroll?: boolean }) {
   const insets = useSafeAreaInsets();
+  const Body = scroll ? ScrollView : View;
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={styles.sheetBackdrop} onPress={onClose}>
         <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + spacing.md }]}>
-          {children}
+          <Body {...(scroll ? { keyboardShouldPersistTaps: 'handled' as const, style: { maxHeight: 460 } } : {})}>
+            {children}
+          </Body>
         </Pressable>
       </Pressable>
     </Modal>
   );
 }
 
-function SheetButton({
-  label, onPress, danger,
-}: { label: string; onPress: () => void; danger?: boolean }) {
+function SheetButton({ label, onPress, danger }: { label: string; onPress: () => void; danger?: boolean }) {
   return (
     <TouchableOpacity style={styles.sheetBtn} onPress={onPress}>
       <Text style={[styles.sheetBtnText, danger && { color: colors.danger }]}>{label}</Text>
@@ -355,79 +464,81 @@ function SheetButton({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.bg },
-  header: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
-  },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, paddingVertical: spacing.md, gap: spacing.sm },
   title: { color: colors.text, fontSize: font.xxl, fontWeight: '700' },
   subtitle: { color: colors.muted, fontSize: font.sm, marginTop: 2 },
-  headerBtn: {
-    backgroundColor: colors.accent, borderRadius: 10,
-    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
-  },
-  headerBtnText: { color: '#000', fontWeight: '700', fontSize: font.sm },
+  iconBtn: { backgroundColor: colors.card, borderRadius: 10, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderWidth: 1, borderColor: colors.border },
+  iconBtnText: { color: colors.accent, fontWeight: '700', fontSize: font.sm },
 
-  headRow: { flexDirection: 'row', borderBottomWidth: 2, borderBottomColor: colors.border },
-  headCell: {
-    paddingVertical: spacing.sm, paddingHorizontal: spacing.sm,
-    justifyContent: 'center', borderRightWidth: 1, borderRightColor: colors.border,
+  summaryBar: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    marginHorizontal: spacing.lg, marginBottom: spacing.md, padding: spacing.md,
+    backgroundColor: colors.card, borderRadius: 12, borderWidth: 1, borderColor: colors.border,
   },
+  summaryCompany: { color: colors.text, fontSize: font.md, fontWeight: '700' },
+  summaryDriver: { color: colors.muted, fontSize: font.sm, marginTop: 2 },
+  summaryPay: { alignItems: 'flex-end' },
+  summaryPayLabel: { color: colors.muted, fontSize: 11 },
+  summaryPayValue: { color: colors.success, fontSize: font.lg, fontWeight: '700' },
+  chevron: { color: colors.muted, fontSize: font.xl, marginLeft: 2 },
+
+  headRow: { flexDirection: 'row', borderBottomWidth: 2, borderBottomColor: colors.border, backgroundColor: colors.bg },
+  headCell: { paddingVertical: spacing.sm, paddingHorizontal: spacing.sm, justifyContent: 'center', borderRightWidth: 1, borderRightColor: colors.border },
   headText: { color: colors.accent, fontSize: font.sm, fontWeight: '700' },
+  addColCell: { alignItems: 'center', borderRightWidth: 0 },
+  addColText: { color: colors.accent, fontSize: 20, fontWeight: '400' },
 
   row: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.border },
   rowAlt: { backgroundColor: colors.card + '55' },
-  cell: {
-    color: colors.text, fontSize: font.md,
-    paddingVertical: spacing.sm, paddingHorizontal: spacing.sm,
-    borderRightWidth: 1, borderRightColor: colors.border,
-    minHeight: 46,
-  },
-  photoCell: {
-    alignItems: 'center', justifyContent: 'center',
-    borderRightWidth: 1, borderRightColor: colors.border, minHeight: 46,
-  },
-  thumb: { width: 40, height: 40, borderRadius: 6 },
+  cell: { color: colors.text, fontSize: font.md, paddingVertical: spacing.sm, paddingHorizontal: spacing.sm, borderRightWidth: 1, borderRightColor: colors.border, minHeight: 46 },
+  photoCell: { alignItems: 'center', justifyContent: 'center', borderRightWidth: 1, borderRightColor: colors.border, minHeight: 46 },
+  thumb: { width: 38, height: 38, borderRadius: 6 },
   photoPlus: { color: colors.muted, fontSize: 22, fontWeight: '300' },
   actionCell: { alignItems: 'center', justifyContent: 'center' },
   trash: { color: colors.danger, fontSize: font.md, fontWeight: '700' },
 
-  addRow: {
-    paddingVertical: spacing.md, alignItems: 'center',
-    borderBottomWidth: 1, borderBottomColor: colors.border,
-  },
+  totalRow: { backgroundColor: colors.card, borderBottomWidth: 2 },
+  totalCell: { paddingVertical: spacing.sm, paddingHorizontal: spacing.sm, justifyContent: 'center' },
+  totalText: { color: colors.muted, fontSize: font.sm, fontWeight: '700' },
+  totalNum: { color: colors.accent, textAlign: 'right' },
+
+  addRow: { paddingVertical: spacing.md, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: colors.border },
   addRowText: { color: colors.accent, fontSize: font.md, fontWeight: '600' },
 
-  // bottom sheet
-  sheetBackdrop: { flex: 1, backgroundColor: '#000a', justifyContent: 'flex-end' },
-  sheet: {
-    backgroundColor: colors.card, borderTopLeftRadius: 18, borderTopRightRadius: 18,
-    padding: spacing.lg, gap: spacing.sm,
-    borderTopWidth: 1, borderColor: colors.border,
+  busyOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: '#0009', alignItems: 'center', justifyContent: 'center',
   },
+
+  sheetBackdrop: { flex: 1, backgroundColor: '#000a', justifyContent: 'flex-end' },
+  sheet: { backgroundColor: colors.card, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: spacing.lg, borderTopWidth: 1, borderColor: colors.border },
   sheetTitle: { color: colors.text, fontSize: font.lg, fontWeight: '700', marginBottom: spacing.sm },
   sheetBtn: { paddingVertical: spacing.md },
   sheetBtnText: { color: colors.text, fontSize: font.md, fontWeight: '500' },
-  sheetInput: {
-    backgroundColor: colors.bg, color: colors.text, borderRadius: 10,
-    padding: spacing.md, fontSize: font.md, borderWidth: 1, borderColor: colors.border,
-  },
-  typeRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
-  typeBtn: {
-    flex: 1, paddingVertical: spacing.sm, borderRadius: 10, alignItems: 'center',
-    borderWidth: 1, borderColor: colors.border,
-  },
+  sheetInput: { backgroundColor: colors.bg, color: colors.text, borderRadius: 10, padding: spacing.md, fontSize: font.md, borderWidth: 1, borderColor: colors.border },
+
+  field: { marginBottom: spacing.sm },
+  fieldRow: { flexDirection: 'row', gap: spacing.sm },
+  fieldLabel: { color: colors.muted, fontSize: font.sm, marginBottom: 4 },
+
+  typeRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  typeBtn: { flex: 1, paddingVertical: spacing.sm, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
   typeBtnActive: { backgroundColor: colors.accent + '22', borderColor: colors.accent },
   typeBtnText: { color: colors.muted, fontWeight: '600' },
   typeBtnTextActive: { color: colors.accent },
-  saveBtn: {
-    backgroundColor: colors.accent, borderRadius: 12, padding: spacing.md,
-    alignItems: 'center', marginTop: spacing.sm,
-  },
+
+  payCard: { backgroundColor: colors.bg, borderRadius: 12, padding: spacing.md, marginTop: spacing.md, borderWidth: 1, borderColor: colors.border },
+  payRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
+  payRowStrong: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: spacing.xs, paddingTop: spacing.sm },
+  payLabel: { color: colors.muted, fontSize: font.sm },
+  payValue: { color: colors.text, fontSize: font.sm, fontWeight: '500' },
+  payStrongText: { color: colors.success, fontSize: font.lg, fontWeight: '700' },
+
+  saveBtn: { backgroundColor: colors.accent, borderRadius: 12, padding: spacing.md, alignItems: 'center', marginTop: spacing.md },
   saveBtnText: { color: '#000', fontWeight: '700', fontSize: font.md },
   deleteLink: { alignItems: 'center', paddingVertical: spacing.sm },
   deleteLinkText: { color: colors.danger, fontSize: font.sm, fontWeight: '600' },
 
-  // preview
   previewBackdrop: { flex: 1, backgroundColor: '#000e', alignItems: 'center', justifyContent: 'center' },
   previewImg: { width: '92%', height: '80%' },
   previewHint: { color: colors.muted, marginTop: spacing.md, fontSize: font.sm },
