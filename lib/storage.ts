@@ -2,8 +2,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Column, Row, Settings, Sheet, Store } from './types';
 import { makeId } from './id';
 
-const STORE_KEY = 'trucker-log.v2';
-const V1_KEY = 'trucker-log.v1'; // single-sheet format from earlier builds
+const STORE_KEY = 'logit.v1';
+const V1_KEY = 'trucker-log.v1'; // single-sheet format from earlier dev builds
 
 export function todayLabel(): string {
   const d = new Date();

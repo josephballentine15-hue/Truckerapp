@@ -1,9 +1,9 @@
 {
   "expo": {
-    "name": "Trucker Log",
-    "slug": "trucker-log",
+    "name": "LogIt",
+    "slug": "logit",
     "version": "1.0.0",
-    "scheme": "truckerlog",
+    "scheme": "logit",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
