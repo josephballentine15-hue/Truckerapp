@@ -5,8 +5,8 @@ import {
   KeyboardAvoidingView, Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Column, ColumnType, Logbook, Row, Settings } from '../lib/types';
-import { loadLogbook, saveLogbook, makeRow } from '../lib/storage';
+import { Column, ColumnType, Row, Settings, Sheet, Store } from '../lib/types';
+import { loadStore, saveStore, makeRow, makeSheet } from '../lib/storage';
 import { capturePhoto, deletePhoto } from '../lib/photos';
 import { computePay, columnTotal, formatMoney } from '../lib/pay';
 import { printLogbook, shareLogbook } from '../lib/export';
@@ -20,78 +20,99 @@ const colWidth = (c: Column) =>
 
 export default function LogbookScreen() {
   const insets = useSafeAreaInsets();
-  const [book, setBook] = useState<Logbook | null>(null);
+  const [store, setStore] = useState<Store | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [photoRowId, setPhotoRowId] = useState<string | null>(null);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [colEditor, setColEditor] = useState<'new' | Column | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [showSheets, setShowSheets] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { loadLogbook().then(setBook); }, []);
+  useEffect(() => { loadStore().then(setStore); }, []);
 
-  const commit = useCallback((next: Logbook) => {
-    setBook(next);
+  const sheet = useMemo(
+    () => store?.sheets.find((s) => s.id === store.activeId) ?? null,
+    [store]
+  );
+
+  const commitStore = useCallback((next: Store) => {
+    setStore(next);
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveLogbook(next), 400);
+    saveTimer.current = setTimeout(() => saveStore(next), 400);
+  }, []);
+
+  const commitSheet = useCallback((nextSheet: Sheet) => {
+    setStore((prev) => {
+      if (!prev) return prev;
+      const next = {
+        ...prev,
+        sheets: prev.sheets.map((s) => (s.id === nextSheet.id ? nextSheet : s)),
+      };
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => saveStore(next), 400);
+      return next;
+    });
   }, []);
 
   useEffect(() => () => { if (saveTimer.current) clearTimeout(saveTimer.current); }, []);
 
+  /* ----- cell / row / column edits (all on the active sheet) ----- */
+
   const setCell = (rowId: string, colId: string, value: string) => {
-    if (!book) return;
-    commit({
-      ...book,
-      rows: book.rows.map((r) => (r.id === rowId ? { ...r, cells: { ...r.cells, [colId]: value } } : r)),
+    if (!sheet) return;
+    commitSheet({
+      ...sheet,
+      rows: sheet.rows.map((r) => (r.id === rowId ? { ...r, cells: { ...r.cells, [colId]: value } } : r)),
     });
   };
 
-  const addRow = () => { if (book) commit({ ...book, rows: [...book.rows, makeRow(book.columns)] }); };
+  const addRow = () => { if (sheet) commitSheet({ ...sheet, rows: [...sheet.rows, makeRow(sheet.columns)] }); };
 
   const deleteRow = (row: Row) => {
-    if (!book) return;
+    if (!sheet) return;
     Alert.alert('Delete row', 'Remove this entry?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete', style: 'destructive', onPress: () => {
           deletePhoto(row.photoUri);
-          commit({ ...book, rows: book.rows.filter((r) => r.id !== row.id) });
+          commitSheet({ ...sheet, rows: sheet.rows.filter((r) => r.id !== row.id) });
         },
       },
     ]);
   };
 
   const saveColumn = (draft: { id?: string; name: string; type: ColumnType }) => {
-    if (!book) return;
+    if (!sheet) return;
     const name = draft.name.trim();
     if (!name) return;
     if (draft.id) {
-      commit({
-        ...book,
-        columns: book.columns.map((c) => (c.id === draft.id ? { ...c, name, type: draft.type } : c)),
+      commitSheet({
+        ...sheet,
+        columns: sheet.columns.map((c) => (c.id === draft.id ? { ...c, name, type: draft.type } : c)),
       });
     } else {
       const col: Column = { id: makeId('c_'), name, type: draft.type };
-      commit({
-        ...book,
-        columns: [...book.columns, col],
-        rows: book.rows.map((r) => ({ ...r, cells: { ...r.cells, [col.id]: '' } })),
+      commitSheet({
+        ...sheet,
+        columns: [...sheet.columns, col],
+        rows: sheet.rows.map((r) => ({ ...r, cells: { ...r.cells, [col.id]: '' } })),
       });
     }
     setColEditor(null);
   };
 
   const deleteColumn = (colId: string) => {
-    if (!book) return;
-    if (book.columns.length <= 1) {
-      Alert.alert('Keep one column', 'A logbook needs at least one column.');
+    if (!sheet) return;
+    if (sheet.columns.length <= 1) {
+      Alert.alert('Keep one column', 'A sheet needs at least one column.');
       return;
     }
-    commit({
-      ...book,
-      columns: book.columns.filter((c) => c.id !== colId),
-      rows: book.rows.map((r) => {
+    commitSheet({
+      ...sheet,
+      columns: sheet.columns.filter((c) => c.id !== colId),
+      rows: sheet.rows.map((r) => {
         const cells = { ...r.cells };
         delete cells[colId];
         return { ...r, cells };
@@ -100,31 +121,92 @@ export default function LogbookScreen() {
     setColEditor(null);
   };
 
+  /* ----- photos ----- */
+
   const choosePhoto = async (source: 'camera' | 'library') => {
     const rowId = photoRowId;
     setPhotoRowId(null);
-    if (!rowId || !book) return;
+    if (!rowId || !sheet) return;
     const uri = await capturePhoto(source);
     if (!uri) return;
-    const existing = book.rows.find((r) => r.id === rowId)?.photoUri;
+    const existing = sheet.rows.find((r) => r.id === rowId)?.photoUri;
     if (existing) deletePhoto(existing);
-    commit({ ...book, rows: book.rows.map((r) => (r.id === rowId ? { ...r, photoUri: uri } : r)) });
+    commitSheet({ ...sheet, rows: sheet.rows.map((r) => (r.id === rowId ? { ...r, photoUri: uri } : r)) });
   };
 
   const removePhoto = () => {
     const rowId = photoRowId;
     setPhotoRowId(null);
-    if (!rowId || !book) return;
-    const row = book.rows.find((r) => r.id === rowId);
+    if (!rowId || !sheet) return;
+    const row = sheet.rows.find((r) => r.id === rowId);
     if (row?.photoUri) deletePhoto(row.photoUri);
-    commit({ ...book, rows: book.rows.map((r) => (r.id === rowId ? { ...r, photoUri: null } : r)) });
+    commitSheet({ ...sheet, rows: sheet.rows.map((r) => (r.id === rowId ? { ...r, photoUri: null } : r)) });
   };
 
+  /* ----- sheets: new week / open / archive / delete ----- */
+
+  const startNewWeek = () => {
+    if (!store || !sheet) return;
+    const fresh = makeSheet(sheet);
+    commitStore({
+      sheets: [
+        fresh,
+        ...store.sheets.map((s) => (s.id === sheet.id ? { ...s, archivedAt: Date.now() } : s)),
+      ],
+      activeId: fresh.id,
+    });
+    setShowSheets(false);
+  };
+
+  const openSheet = (id: string) => {
+    if (!store) return;
+    commitStore({ ...store, activeId: id });
+    setShowSheets(false);
+  };
+
+  const toggleArchive = (s: Sheet) => {
+    if (!store) return;
+    commitStore({
+      ...store,
+      sheets: store.sheets.map((x) =>
+        x.id === s.id ? { ...x, archivedAt: x.archivedAt ? null : Date.now() } : x
+      ),
+    });
+  };
+
+  const deleteSheet = (s: Sheet) => {
+    if (!store) return;
+    Alert.alert(
+      'Delete sheet',
+      `Delete "${s.name}" and its ${s.rows.length} ${s.rows.length === 1 ? 'entry' : 'entries'}? This can't be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete', style: 'destructive', onPress: () => {
+            for (const r of s.rows) deletePhoto(r.photoUri);
+            let sheets = store.sheets.filter((x) => x.id !== s.id);
+            let activeId = store.activeId;
+            if (sheets.length === 0) {
+              const fresh = makeSheet(s); // keep columns/letterhead even when wiping
+              sheets = [fresh];
+              activeId = fresh.id;
+            } else if (activeId === s.id) {
+              activeId = (sheets.find((x) => !x.archivedAt) ?? sheets[0]).id;
+            }
+            commitStore({ sheets, activeId });
+          },
+        },
+      ]
+    );
+  };
+
+  /* ----- send / print ----- */
+
   const onSend = async () => {
-    if (!book || busy) return;
+    if (!sheet || busy) return;
     setBusy(true);
     try {
-      const ok = await shareLogbook(book);
+      const ok = await shareLogbook(sheet);
       if (!ok) Alert.alert('Not available', 'Sharing isn’t supported on this device.');
     } catch (e: any) {
       Alert.alert('Could not send', e?.message ?? 'Something went wrong.');
@@ -134,10 +216,10 @@ export default function LogbookScreen() {
   };
 
   const onPrint = async () => {
-    if (!book || busy) return;
+    if (!sheet || busy) return;
     setBusy(true);
     try {
-      await printLogbook(book);
+      await printLogbook(sheet);
     } catch (e: any) {
       Alert.alert('Could not print', e?.message ?? 'Something went wrong.');
     } finally {
@@ -146,12 +228,12 @@ export default function LogbookScreen() {
   };
 
   const gridWidth = useMemo(
-    () => (book ? PHOTO_W + book.columns.reduce((w, c) => w + colWidth(c), 0) + ACTIONS_W : 0),
-    [book]
+    () => (sheet ? PHOTO_W + sheet.columns.reduce((w, c) => w + colWidth(c), 0) + ACTIONS_W : 0),
+    [sheet]
   );
-  const pay = useMemo(() => (book ? computePay(book) : null), [book]);
+  const pay = useMemo(() => (sheet ? computePay(sheet) : null), [sheet]);
 
-  if (!book || !pay) {
+  if (!store || !sheet || !pay) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator color={colors.accent} size="large" />
@@ -159,7 +241,7 @@ export default function LogbookScreen() {
     );
   }
 
-  const activeRow = photoRowId ? book.rows.find((r) => r.id === photoRowId) : null;
+  const activeRow = photoRowId ? sheet.rows.find((r) => r.id === photoRowId) : null;
 
   return (
     <KeyboardAvoidingView
@@ -168,12 +250,16 @@ export default function LogbookScreen() {
     >
       {/* toolbar */}
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.title}>Logbook</Text>
+        <TouchableOpacity style={{ flex: 1 }} onPress={() => setShowSheets(true)}>
+          <View style={styles.titleRow}>
+            <Text style={styles.title} numberOfLines={1}>{sheet.name}</Text>
+            <Text style={styles.titleCaret}>▾</Text>
+          </View>
           <Text style={styles.subtitle}>
-            {book.rows.length} {book.rows.length === 1 ? 'entry' : 'entries'}
+            {sheet.rows.length} {sheet.rows.length === 1 ? 'entry' : 'entries'}
+            {sheet.archivedAt ? '  ·  archived' : ''}
           </Text>
-        </View>
+        </TouchableOpacity>
         <TouchableOpacity style={styles.iconBtn} onPress={onSend} disabled={busy}>
           <Text style={styles.iconBtnText}>Send</Text>
         </TouchableOpacity>
@@ -186,10 +272,10 @@ export default function LogbookScreen() {
       <TouchableOpacity style={styles.summaryBar} onPress={() => setShowDetails(true)}>
         <View style={{ flex: 1 }}>
           <Text style={styles.summaryCompany} numberOfLines={1}>
-            {book.settings.companyName || 'Set company'}
+            {sheet.settings.companyName || 'Set company'}
           </Text>
           <Text style={styles.summaryDriver} numberOfLines={1}>
-            {book.settings.driverName ? `Driver: ${book.settings.driverName}` : 'Tap to add driver & pay details'}
+            {sheet.settings.driverName ? `Driver: ${sheet.settings.driverName}` : 'Tap to add driver & pay details'}
           </Text>
         </View>
         <View style={styles.summaryPay}>
@@ -205,8 +291,10 @@ export default function LogbookScreen() {
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ minWidth: gridWidth }}>
         <View style={{ flex: 1 }}>
           <View style={styles.headRow}>
-            <View style={[styles.headCell, { width: PHOTO_W }]}><Text style={styles.headText}>Photo</Text></View>
-            {book.columns.map((c) => (
+            <View style={[styles.headCell, { width: PHOTO_W }]}>
+              <Text style={[styles.headText, { fontSize: 11 }]} numberOfLines={1}>Photo</Text>
+            </View>
+            {sheet.columns.map((c) => (
               <TouchableOpacity key={c.id} style={[styles.headCell, { width: colWidth(c) }]} onPress={() => setColEditor(c)}>
                 <Text style={styles.headText} numberOfLines={1}>{c.name}</Text>
               </TouchableOpacity>
@@ -217,17 +305,17 @@ export default function LogbookScreen() {
           </View>
 
           <FlatList
-            data={book.rows}
+            data={sheet.rows}
             keyExtractor={(r) => r.id}
             keyboardShouldPersistTaps="handled"
             ListFooterComponent={
               <View>
                 <View style={[styles.row, styles.totalRow, { width: gridWidth }]}>
                   <View style={{ width: PHOTO_W }} />
-                  {book.columns.map((c, i) => (
+                  {sheet.columns.map((c, i) => (
                     <View key={c.id} style={[styles.totalCell, { width: colWidth(c) }]}>
                       <Text style={[styles.totalText, c.type === 'number' && styles.totalNum]} numberOfLines={1}>
-                        {c.type === 'number' ? formatMoney(columnTotal(book, c.id)) : i === 0 ? 'TOTAL' : ''}
+                        {c.type === 'number' ? formatMoney(columnTotal(sheet, c.id)) : i === 0 ? 'TOTAL' : ''}
                       </Text>
                     </View>
                   ))}
@@ -248,7 +336,7 @@ export default function LogbookScreen() {
                   {item.photoUri ? <Image source={{ uri: item.photoUri }} style={styles.thumb} /> : <Text style={styles.photoPlus}>＋</Text>}
                 </TouchableOpacity>
 
-                {book.columns.map((c) => (
+                {sheet.columns.map((c) => (
                   <TextInput
                     key={c.id}
                     style={[styles.cell, { width: colWidth(c) }]}
@@ -302,30 +390,127 @@ export default function LogbookScreen() {
       {/* details / pay */}
       <DetailsSheet
         visible={showDetails}
-        settings={book.settings}
+        sheetName={sheet.name}
+        settings={sheet.settings}
         pay={pay}
         onClose={() => setShowDetails(false)}
-        onChange={(settings) => commit({ ...book, settings })}
+        onChangeName={(name) => commitSheet({ ...sheet, name })}
+        onChange={(settings) => commitSheet({ ...sheet, settings })}
+      />
+
+      {/* sheets manager */}
+      <SheetsModal
+        visible={showSheets}
+        store={store}
+        onClose={() => setShowSheets(false)}
+        onNewWeek={startNewWeek}
+        onOpen={openSheet}
+        onToggleArchive={toggleArchive}
+        onDelete={deleteSheet}
       />
     </KeyboardAvoidingView>
   );
 }
 
-/* ---------- Details & pay sheet ---------- */
-function DetailsSheet({
-  visible, settings, pay, onClose, onChange,
+/* ---------- Sheets manager ---------- */
+function SheetsModal({
+  visible, store, onClose, onNewWeek, onOpen, onToggleArchive, onDelete,
 }: {
   visible: boolean;
+  store: Store;
+  onClose: () => void;
+  onNewWeek: () => void;
+  onOpen: (id: string) => void;
+  onToggleArchive: (s: Sheet) => void;
+  onDelete: (s: Sheet) => void;
+}) {
+  const current = store.sheets.filter((s) => !s.archivedAt);
+  const archived = store.sheets.filter((s) => !!s.archivedAt);
+
+  const renderSheet = (s: Sheet) => {
+    const pay = computePay(s);
+    const isActive = s.id === store.activeId;
+    return (
+      <View key={s.id} style={[sheetStyles.item, isActive && sheetStyles.itemActive]}>
+        <TouchableOpacity style={{ flex: 1 }} onPress={() => onOpen(s.id)}>
+          <Text style={sheetStyles.itemName} numberOfLines={1}>
+            {s.name}{isActive ? '  ·  open' : ''}
+          </Text>
+          <Text style={sheetStyles.itemMeta}>
+            {s.rows.length} {s.rows.length === 1 ? 'entry' : 'entries'} · {formatMoney(pay.hasPay ? pay.takeHome : pay.gross)}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={sheetStyles.itemBtn} onPress={() => onToggleArchive(s)}>
+          <Text style={sheetStyles.itemBtnText}>{s.archivedAt ? 'Unarchive' : 'Archive'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={sheetStyles.itemBtn} onPress={() => onDelete(s)}>
+          <Text style={[sheetStyles.itemBtnText, { color: colors.danger }]}>Delete</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  return (
+    <BottomSheet visible={visible} onClose={onClose} scroll>
+      <Text style={styles.sheetTitle}>My sheets</Text>
+
+      <TouchableOpacity style={styles.saveBtn} onPress={onNewWeek}>
+        <Text style={styles.saveBtnText}>＋  Start new week</Text>
+      </TouchableOpacity>
+      <Text style={sheetStyles.hint}>
+        Starts a fresh sheet with the same columns, company, and driver — and archives the current one.
+      </Text>
+
+      {current.length > 0 && (
+        <>
+          <Text style={sheetStyles.section}>Current</Text>
+          {current.map(renderSheet)}
+        </>
+      )}
+
+      {archived.length > 0 && (
+        <>
+          <Text style={sheetStyles.section}>Archived</Text>
+          {archived.map(renderSheet)}
+        </>
+      )}
+    </BottomSheet>
+  );
+}
+
+const sheetStyles = StyleSheet.create({
+  hint: { color: colors.muted, fontSize: font.sm, marginTop: spacing.sm, marginBottom: spacing.xs },
+  section: { color: colors.muted, fontSize: font.sm, fontWeight: '700', marginTop: spacing.lg, marginBottom: spacing.xs, textTransform: 'uppercase', letterSpacing: 0.5 },
+  item: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    backgroundColor: colors.bg, borderRadius: 10, borderWidth: 1, borderColor: colors.border,
+    padding: spacing.md, marginTop: spacing.sm,
+  },
+  itemActive: { borderColor: colors.accent },
+  itemName: { color: colors.text, fontSize: font.md, fontWeight: '600' },
+  itemMeta: { color: colors.muted, fontSize: font.sm, marginTop: 2 },
+  itemBtn: { paddingHorizontal: spacing.xs, paddingVertical: spacing.xs },
+  itemBtnText: { color: colors.accent, fontSize: font.sm, fontWeight: '600' },
+});
+
+/* ---------- Details & pay sheet ---------- */
+function DetailsSheet({
+  visible, sheetName, settings, pay, onClose, onChange, onChangeName,
+}: {
+  visible: boolean;
+  sheetName: string;
   settings: Settings;
   pay: ReturnType<typeof computePay>;
   onClose: () => void;
   onChange: (s: Settings) => void;
+  onChangeName: (name: string) => void;
 }) {
   const set = (k: keyof Settings, v: string) => onChange({ ...settings, [k]: v });
   return (
     <BottomSheet visible={visible} onClose={onClose} scroll>
       <Text style={styles.sheetTitle}>Sheet details</Text>
 
+      <Field label="Sheet name" value={sheetName} onChange={onChangeName} />
       <Field label="Company" value={settings.companyName} onChange={(v) => set('companyName', v)} />
       <Field label="Address" value={settings.companyAddress} onChange={(v) => set('companyAddress', v)} />
       <View style={styles.fieldRow}>
@@ -444,7 +629,7 @@ function BottomSheet({
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={styles.sheetBackdrop} onPress={onClose}>
         <Pressable style={[styles.sheet, { paddingBottom: insets.bottom + spacing.md }]}>
-          <Body {...(scroll ? { keyboardShouldPersistTaps: 'handled' as const, style: { maxHeight: 460 } } : {})}>
+          <Body {...(scroll ? { keyboardShouldPersistTaps: 'handled' as const, style: { maxHeight: 520 } } : {})}>
             {children}
           </Body>
         </Pressable>
@@ -465,15 +650,17 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: colors.bg },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, paddingVertical: spacing.md, gap: spacing.sm },
-  title: { color: colors.text, fontSize: font.xxl, fontWeight: '700' },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  title: { color: colors.text, fontSize: font.xl, fontWeight: '700', flexShrink: 1 },
+  titleCaret: { color: colors.muted, fontSize: font.md },
   subtitle: { color: colors.muted, fontSize: font.sm, marginTop: 2 },
-  iconBtn: { backgroundColor: colors.card, borderRadius: 10, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderWidth: 1, borderColor: colors.border },
+  iconBtn: { backgroundColor: colors.card, borderRadius: 8, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderWidth: 1, borderColor: colors.border },
   iconBtnText: { color: colors.accent, fontWeight: '700', fontSize: font.sm },
 
   summaryBar: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
     marginHorizontal: spacing.lg, marginBottom: spacing.md, padding: spacing.md,
-    backgroundColor: colors.card, borderRadius: 12, borderWidth: 1, borderColor: colors.border,
+    backgroundColor: colors.card, borderRadius: 10, borderWidth: 1, borderColor: colors.border,
   },
   summaryCompany: { color: colors.text, fontSize: font.md, fontWeight: '700' },
   summaryDriver: { color: colors.muted, fontSize: font.sm, marginTop: 2 },
@@ -482,14 +669,14 @@ const styles = StyleSheet.create({
   summaryPayValue: { color: colors.success, fontSize: font.lg, fontWeight: '700' },
   chevron: { color: colors.muted, fontSize: font.xl, marginLeft: 2 },
 
-  headRow: { flexDirection: 'row', borderBottomWidth: 2, borderBottomColor: colors.border, backgroundColor: colors.bg },
+  headRow: { flexDirection: 'row', borderBottomWidth: 2, borderBottomColor: colors.border, backgroundColor: colors.card },
   headCell: { paddingVertical: spacing.sm, paddingHorizontal: spacing.sm, justifyContent: 'center', borderRightWidth: 1, borderRightColor: colors.border },
-  headText: { color: colors.accent, fontSize: font.sm, fontWeight: '700' },
+  headText: { color: colors.text, fontSize: font.sm, fontWeight: '700' },
   addColCell: { alignItems: 'center', borderRightWidth: 0 },
   addColText: { color: colors.accent, fontSize: 20, fontWeight: '400' },
 
   row: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.border },
-  rowAlt: { backgroundColor: colors.card + '55' },
+  rowAlt: { backgroundColor: colors.card },
   cell: { color: colors.text, fontSize: font.md, paddingVertical: spacing.sm, paddingHorizontal: spacing.sm, borderRightWidth: 1, borderRightColor: colors.border, minHeight: 46 },
   photoCell: { alignItems: 'center', justifyContent: 'center', borderRightWidth: 1, borderRightColor: colors.border, minHeight: 46 },
   thumb: { width: 38, height: 38, borderRadius: 6 },
@@ -500,46 +687,47 @@ const styles = StyleSheet.create({
   totalRow: { backgroundColor: colors.card, borderBottomWidth: 2 },
   totalCell: { paddingVertical: spacing.sm, paddingHorizontal: spacing.sm, justifyContent: 'center' },
   totalText: { color: colors.muted, fontSize: font.sm, fontWeight: '700' },
-  totalNum: { color: colors.accent, textAlign: 'right' },
+  totalNum: { color: colors.accentDark, textAlign: 'right' },
 
-  addRow: { paddingVertical: spacing.md, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: colors.border },
+  // left-aligned so it stays on-screen even when the grid is wider than the phone
+  addRow: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, alignItems: 'flex-start', borderBottomWidth: 1, borderBottomColor: colors.border },
   addRowText: { color: colors.accent, fontSize: font.md, fontWeight: '600' },
 
   busyOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: '#0009', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#0006', alignItems: 'center', justifyContent: 'center',
   },
 
-  sheetBackdrop: { flex: 1, backgroundColor: '#000a', justifyContent: 'flex-end' },
-  sheet: { backgroundColor: colors.card, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: spacing.lg, borderTopWidth: 1, borderColor: colors.border },
+  sheetBackdrop: { flex: 1, backgroundColor: '#0007', justifyContent: 'flex-end' },
+  sheet: { backgroundColor: colors.bg, borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: spacing.lg, borderTopWidth: 1, borderColor: colors.border },
   sheetTitle: { color: colors.text, fontSize: font.lg, fontWeight: '700', marginBottom: spacing.sm },
   sheetBtn: { paddingVertical: spacing.md },
   sheetBtnText: { color: colors.text, fontSize: font.md, fontWeight: '500' },
-  sheetInput: { backgroundColor: colors.bg, color: colors.text, borderRadius: 10, padding: spacing.md, fontSize: font.md, borderWidth: 1, borderColor: colors.border },
+  sheetInput: { backgroundColor: colors.card, color: colors.text, borderRadius: 8, padding: spacing.md, fontSize: font.md, borderWidth: 1, borderColor: colors.border },
 
   field: { marginBottom: spacing.sm },
   fieldRow: { flexDirection: 'row', gap: spacing.sm },
   fieldLabel: { color: colors.muted, fontSize: font.sm, marginBottom: 4 },
 
   typeRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
-  typeBtn: { flex: 1, paddingVertical: spacing.sm, borderRadius: 10, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
-  typeBtnActive: { backgroundColor: colors.accent + '22', borderColor: colors.accent },
+  typeBtn: { flex: 1, paddingVertical: spacing.sm, borderRadius: 8, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
+  typeBtnActive: { backgroundColor: colors.accent + '18', borderColor: colors.accent },
   typeBtnText: { color: colors.muted, fontWeight: '600' },
-  typeBtnTextActive: { color: colors.accent },
+  typeBtnTextActive: { color: colors.accentDark },
 
-  payCard: { backgroundColor: colors.bg, borderRadius: 12, padding: spacing.md, marginTop: spacing.md, borderWidth: 1, borderColor: colors.border },
+  payCard: { backgroundColor: colors.card, borderRadius: 10, padding: spacing.md, marginTop: spacing.md, borderWidth: 1, borderColor: colors.border },
   payRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
   payRowStrong: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: spacing.xs, paddingTop: spacing.sm },
   payLabel: { color: colors.muted, fontSize: font.sm },
   payValue: { color: colors.text, fontSize: font.sm, fontWeight: '500' },
-  payStrongText: { color: colors.success, fontSize: font.lg, fontWeight: '700' },
+  payStrongText: { color: colors.accentDark, fontSize: font.lg, fontWeight: '700' },
 
-  saveBtn: { backgroundColor: colors.accent, borderRadius: 12, padding: spacing.md, alignItems: 'center', marginTop: spacing.md },
-  saveBtnText: { color: '#000', fontWeight: '700', fontSize: font.md },
+  saveBtn: { backgroundColor: colors.accent, borderRadius: 8, padding: spacing.md, alignItems: 'center', marginTop: spacing.md },
+  saveBtnText: { color: '#fff', fontWeight: '700', fontSize: font.md },
   deleteLink: { alignItems: 'center', paddingVertical: spacing.sm },
   deleteLinkText: { color: colors.danger, fontSize: font.sm, fontWeight: '600' },
 
   previewBackdrop: { flex: 1, backgroundColor: '#000e', alignItems: 'center', justifyContent: 'center' },
   previewImg: { width: '92%', height: '80%' },
-  previewHint: { color: colors.muted, marginTop: spacing.md, fontSize: font.sm },
+  previewHint: { color: '#f0f0f0', marginTop: spacing.md, fontSize: font.sm },
 });

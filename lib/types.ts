@@ -1,6 +1,7 @@
-// The logbook is a tiny spreadsheet: user-defined columns and a list of rows,
-// plus a settings block for the letterhead and pay math. Everything lives on
-// the device — no account, no server.
+// The app holds multiple "sheets" (one per week, like paper settlement
+// sheets). Each sheet is a tiny spreadsheet: user-defined columns, rows,
+// and a settings block for the letterhead and pay math. Everything lives
+// on the device — no account, no server.
 
 export type ColumnType = 'text' | 'number';
 
@@ -32,8 +33,20 @@ export type Settings = {
   deduction: string;  // subtracted after the split, e.g. "300"
 };
 
-export type Logbook = {
+export type Sheet = {
+  id: string;
+  name: string;        // e.g. "Week of 7/13/2026"
+  createdAt: number;
+  archivedAt: number | null;
   columns: Column[];
   rows: Row[];
   settings: Settings;
+};
+
+// The shape pay math and the printable sheet operate on; every Sheet is one.
+export type Logbook = Pick<Sheet, 'columns' | 'rows' | 'settings'>;
+
+export type Store = {
+  sheets: Sheet[];
+  activeId: string;
 };

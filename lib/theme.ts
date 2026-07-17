@@ -1,13 +1,14 @@
+// Light, Google-Sheets-like palette: white canvas, gray gridlines, green accent.
 export const colors = {
-  bg: '#0f1923',
-  card: '#1a2332',
-  border: '#2a3547',
-  text: '#f0f4f8',
-  muted: '#7a8fa6',
-  accent: '#f5a623',
-  accentDark: '#c07d0f',
-  danger: '#e05252',
-  success: '#3ecf8e',
+  bg: '#ffffff',
+  card: '#f8f9fa',
+  border: '#dadce0',
+  text: '#202124',
+  muted: '#5f6368',
+  accent: '#188038',
+  accentDark: '#0d652d',
+  danger: '#d93025',
+  success: '#188038',
 };
 
 export const spacing = {
